@@ -15,8 +15,6 @@
 
 extern int server_socket_create(const char address[], int port, int backlog, bool debug);
 
-extern int client_socket_create(const char address[], int port, bool debug);
-
 extern int socket_accept(int sockfd, const char address[], int port, bool debug);
 
 extern int socket_close(int* sockfd, bool debug);

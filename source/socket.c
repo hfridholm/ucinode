@@ -126,53 +126,6 @@ int server_socket_create(const char address[], int port, int backlog, bool debug
 }
 
 /*
- * connect, with debug messages
- *
- * RETURN (same as connect)
- * - 0  | Success!
- * - -1 | Failed to connect to server socket
- */
-int socket_connect(int sockfd, const char address[], int port, bool debug)
-{
-  struct sockaddr_in addr = sockaddr_create(sockfd, address, port, debug);
-
-  if(debug) info_print("Connecting socket (%s:%d)", address, port);
-
-  if(connect(sockfd, (struct sockaddr*) &addr, sizeof(addr)) == -1)
-  {
-    if(debug) error_print("Failed to connect socket (%s:%d): %s", address, port, strerror(errno));
-
-    return -1;
-  }
-
-  if(debug) info_print("Connected socket (%s:%d)", address, port);
-
-  return 0;
-}
-
-/*
- * Create a client socket and connect it to the server socket
- *
- * RETURN (same as socket)
- * - SUCCESS | File descriptor of created client socket
- * - ERROR   | -1
- */
-int client_socket_create(const char address[], int port, bool debug)
-{
-  int sockfd = socket_create(debug);
-
-  if(sockfd == -1) return -1;
-
-  if(socket_connect(sockfd, address, port, debug) == -1)
-  {
-    socket_close(&sockfd, debug);
-
-    return -1;
-  }
-  return sockfd;
-}
-
-/*
  * accept, but with address and port, and with debug messages
  *
  * RETURN (same as accept)

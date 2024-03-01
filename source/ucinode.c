@@ -11,6 +11,9 @@
 pthread_t stdinThread;  // Communication from engine to client
 pthread_t stdoutThread; // Communication from client to engine
 
+bool stdinThreadRunning = false;
+bool stdoutThreadRunning = false;
+
 int serverfd = -1;
 int sockfd = -1;
 
@@ -34,6 +37,8 @@ char stdoutPathname[64] = "stdout";
  */
 void* stdout_routine(void* arg)
 {
+  stdoutThreadRunning = true;
+
   info_print("Redirecting socket -> fifo");
 
   char buffer[1024];
@@ -63,12 +68,16 @@ void* stdout_routine(void* arg)
   // Interrupt stdin thread
   pthread_kill(stdinThread, SIGUSR1);
 
+  stdoutThreadRunning = false;
+
   return NULL;
 }
 
 // Communication from engine to client
 void* stdin_routine(void* arg)
 {
+  stdinThreadRunning = true;
+
   info_print("Redirecting fifo -> socket");
 
   char buffer[1024];
@@ -95,6 +104,8 @@ void* stdin_routine(void* arg)
   // Interrupt stdout thread
   pthread_kill(stdoutThread, SIGUSR1);
 
+  stdinThreadRunning = false;
+
   return NULL;
 }
 
@@ -107,8 +118,8 @@ void sigint_handler(int signum)
 
   acceptNewClient = false;
 
-  pthread_kill(stdinThread, SIGUSR1);
-  pthread_kill(stdoutThread, SIGUSR1);
+  if(stdinThreadRunning) pthread_kill(stdinThread, SIGUSR1);
+  if(stdoutThreadRunning) pthread_kill(stdoutThread, SIGUSR1);
 }
 
 void sigint_handler_setup(void)
