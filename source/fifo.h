@@ -10,12 +10,13 @@
 #include <string.h>
 #include <unistd.h>
 
-extern int buffer_read(int fd, char* buffer, size_t size);
+extern ssize_t buffer_read(int fd, char* buffer, size_t size);
 
-extern int buffer_write(int fd, const char* buffer, size_t size);
+extern ssize_t buffer_write(int fd, const char* buffer, size_t size);
 
-extern int stdin_stdout_fifo_close(int* stdinFIFO, int* stdoutFIFO, bool debug);
 
-extern int stdin_stdout_fifo_open(int* stdinFIFO, const char* stdinPathname, int* stdoutFIFO, const char* stdoutPathname, bool reversed, bool debug);
+extern int stdin_stdout_fifo_open(int* stdin_fifo, const char* stdin_path, int* stdout_fifo, const char* stdout_path, bool reverse, bool debug);
+
+extern int stdin_stdout_fifo_close(int* stdin_fifo, int* stdout_fifo, bool debug);
 
 #endif // FIFO_H
