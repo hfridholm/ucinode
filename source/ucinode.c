@@ -120,33 +120,46 @@ void* stdout_routine(void* arg)
 {
   stdout_running = true;
 
-  if(args.debug) info_print("start of stdout routine");
+  if(args.debug) info_print("Start of stdout routine");
 
   char buffer[1024];
   memset(buffer, '\0', sizeof(buffer));
 
-  int status;
+  int read_status  = -1;
+  int write_status = -1;
 
-  while((status = socket_read(sockfd, buffer, sizeof(buffer))) > 0)
+  while((read_status = socket_read(sockfd, buffer, sizeof(buffer))) > 0)
   {
     debug_print(stdout, "client -> engine", "%s", buffer);
 
     if(!strncmp(buffer, "quit", 4)) break;
 
-    if((status = buffer_write(stdout_fifo, buffer, sizeof(buffer))) <= 0) break;
+    if((write_status = buffer_write(stdout_fifo, buffer, sizeof(buffer))) <= 0) break;
 
     memset(buffer, '\0', sizeof(buffer));
   }
 
-  if(errno != 0 && args.debug) error_print("%s", strerror(errno));
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+  }
 
-  if(args.debug) info_print("killing stdin routine...");
+  // This code block is not needed, but catches the stopped engine earlier
+  // If the stdout pipe is broken (32), the node should not be running
+  if(write_status == -1 && errno == 32)
+  {
+    if(args.debug) info_print("Shutting node down");
+
+    node_running = false;
+  }
+
+  if(args.debug) info_print("Interrupting stdin routine");
 
   if(stdin_running) pthread_kill(stdin_thread, SIGUSR1);
 
   stdout_running = false;
 
-  if(args.debug) info_print("end of stdout routine");
+  if(args.debug) info_print("End of stdout routine");
 
   return NULL;
 }
@@ -158,45 +171,46 @@ void* stdin_routine(void* arg)
 {
   stdin_running = true;
 
-  if(args.debug) info_print("start of stdin routine");
+  if(args.debug) info_print("Start of stdin routine");
 
   char buffer[1024];
   memset(buffer, '\0', sizeof(buffer));
 
-  int status;
+  int read_status  = -1;
+  int write_status = -1;
 
-  while((status = buffer_read(stdin_fifo, buffer, sizeof(buffer))) > 0)
+  while((read_status = buffer_read(stdin_fifo, buffer, sizeof(buffer))) > 0)
   {
     debug_print(stdout, "engine -> client", "%s", buffer);
 
-    if((status = socket_write(sockfd, buffer, sizeof(buffer))) <= 0) break;
+    if((write_status = socket_write(sockfd, buffer, sizeof(buffer))) <= 0) break;
 
     memset(buffer, '\0', sizeof(buffer));
   }
 
-  if(errno != 0 && args.debug) error_print("%s", strerror(errno));
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+  }
 
-  if(args.debug) info_print("killing stdout routine...");
+  // This code block is not needed, but catches the stopped engine earlier
+  // If the stdin fifo is broken (End Of File), the node should not be running
+  if(read_status == 0)
+  {
+    if(args.debug) info_print("Shutting node down");
+
+    node_running = false;
+  }
+
+  if(args.debug) info_print("Interrupting stdout routine");
 
   if(stdout_running) pthread_kill(stdout_thread, SIGUSR1);
 
   stdin_running = false;
 
-  if(args.debug) info_print("end of stdin routine");
+  if(args.debug) info_print("End of stdin routine");
 
   return NULL;
-}
-
-/*
- *
- */
-static void fifos_socket_close(void)
-{
-  stdin_stdout_fifo_close(&stdin_fifo, &stdout_fifo, args.debug);
-
-  socket_close(&sockfd, args.debug);
-
-  socket_close(&servfd, args.debug);
 }
 
 /*
@@ -206,7 +220,7 @@ static void sigint_handler(int signum)
 {
   if(args.debug) info_print("Keyboard interrupt");
 
-  fifos_socket_close();
+  node_running = false;
 
   if(stdin_running)  pthread_kill(stdin_thread, SIGUSR1);
 
@@ -220,7 +234,7 @@ static void sigpipe_handler(int signum)
 {
   if(args.debug) error_print("Pipe has been broken");
 
-  fifos_socket_close();
+  node_running = false;
 
   if(stdin_running)  pthread_kill(stdin_thread, SIGUSR1);
 
@@ -287,12 +301,64 @@ static void signals_handler_setup(void)
 }
 
 /*
+ * Tell the chess engine to quit, by sending it a quit message
+ */
+static void engine_quit(void)
+{
+  if(args.debug) info_print("Quitting engine");
+
+  if(stdout_fifo) message_write(stdout_fifo, "quit\n");
+}
+
+/*
+ * Reset the chess engine for the next client, by 
+ * - starting a new UCI game and
+ * - setting the position to the start position 
+ */
+static int engine_reset(void)
+{
+  if(args.debug) info_print("Establishing engine UCI communication");
+
+  message_write(stdout_fifo, "uci\n");
+
+  char buffer[1024];
+  memset(buffer, '\0', sizeof(buffer));
+
+  // The "status" variable can be used to extract diagnostics
+  int status;
+
+  while((status = buffer_read(stdin_fifo, buffer, sizeof(buffer))) > 0)
+  {
+    if(strncmp(buffer, "uciok", 5) == 0) break;
+
+    memset(buffer, '\0', sizeof(buffer));
+  }
+
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+
+    return 1;
+  }
+
+  if(args.debug) info_print("Setting up new engine game");
+
+  message_write(stdout_fifo, "ucinewgame\n");
+
+  message_write(stdout_fifo, "position startpos\n");
+
+  return 0;
+}
+
+/*
  * Run as long as the server is still running
  */
 static void node_routine(void)
 {
   while(node_running && servfd != -1)
   {
+    if(engine_reset() != 0) break;
+
     sockfd = socket_accept(servfd, args.address, args.port, args.debug);
 
     // If the server socket fails, stop node
@@ -302,6 +368,8 @@ static void node_routine(void)
 
     socket_close(&sockfd, args.debug);
   }
+
+  engine_quit();
 }
 
 /*
@@ -348,6 +416,8 @@ int main(int argc, char* argv[])
   socket_close(&sockfd, args.debug);
 
   socket_close(&servfd, args.debug);
+
+  if(args.debug) info_print("End of main");
 
   return 0;
 }

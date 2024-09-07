@@ -276,3 +276,11 @@ ssize_t buffer_write(int fd, const char* buffer, size_t size)
 
   return index;
 }
+
+/*
+ * buffer_write, but with just a string instead of an allocated buffer
+ */
+ssize_t message_write(int fd, const char* message)
+{
+  return buffer_write(fd, message, strlen(message));
+}
