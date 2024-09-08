@@ -1,7 +1,7 @@
 /*
  * Written by Hampus Fridholm
  *
- * Last updated: 2024-09-06
+ * Last updated: 2024-09-07
  */
 
 #include "thread.h"
@@ -14,7 +14,7 @@
  * - 1 | Failed to create stdin thread
  * - 2 | Failed to create stdout thread
  */
-int stdin_stdout_thread_create(pthread_t* stdin_thread, void *(*stdin_routine) (void *), pthread_t* stdout_thread, void *(*stdout_routine) (void *), bool debug)
+static int stdin_stdout_thread_create(pthread_t* stdin_thread, void *(*stdin_routine) (void *), pthread_t* stdout_thread, void *(*stdout_routine) (void *), bool debug)
 {
   if(pthread_create(stdin_thread, NULL, stdin_routine, NULL) != 0)
   {
@@ -39,7 +39,7 @@ int stdin_stdout_thread_create(pthread_t* stdin_thread, void *(*stdin_routine) (
 /*
  * Join stdin and stdout threads
  */
-void stdin_stdout_thread_join(pthread_t stdin_thread, pthread_t stdout_thread, bool debug)
+static void stdin_stdout_thread_join(pthread_t stdin_thread, pthread_t stdout_thread, bool debug)
 {
   if(pthread_join(stdin_thread, NULL) != 0)
   {

@@ -1,7 +1,7 @@
 /*
  * Written by Hampus Fridholm
  *
- * Last updated: 2024-09-06
+ * Last updated: 2024-09-08
  */
 
 #define DEFAULT_ADDRESS "127.0.0.1"
@@ -123,20 +123,19 @@ void* stdout_routine(void* arg)
   if(args.debug) info_print("Start of stdout routine");
 
   char buffer[1024];
-  memset(buffer, '\0', sizeof(buffer));
 
-  int read_status  = -1;
-  int write_status = -1;
+  int read_size  = -1, write_size = -1;
 
-  while((read_status = socket_read(sockfd, buffer, sizeof(buffer))) > 0)
+  while((read_size = socket_read(sockfd, buffer, sizeof(buffer) - 1)) > 0)
   {
-    debug_print(stdout, "client -> engine", "%s", buffer);
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    if(!strncmp(buffer, "quit", 4)) break;
+    if(args.debug) debug_print(stdout, "client -> engine", "%s", buffer);
 
-    if((write_status = buffer_write(stdout_fifo, buffer, sizeof(buffer))) <= 0) break;
+    if(strncmp(buffer, "quit", 4) == 0) break;
 
-    memset(buffer, '\0', sizeof(buffer));
+    if((write_size = buffer_write(stdout_fifo, buffer, sizeof(buffer))) <= 0) break;
   }
 
   if(errno != 0)
@@ -146,16 +145,19 @@ void* stdout_routine(void* arg)
 
   // This code block is not needed, but catches the stopped engine earlier
   // If the stdout pipe is broken (32), the node should not be running
-  if(write_status == -1 && errno == 32)
+  if(write_size == -1 && errno == 32)
   {
     if(args.debug) info_print("Shutting node down");
 
     node_running = false;
   }
 
-  if(args.debug) info_print("Interrupting stdin routine");
+  if(stdin_running)
+  {
+    if(args.debug) info_print("Interrupting stdin routine");
 
-  if(stdin_running) pthread_kill(stdin_thread, SIGUSR1);
+    pthread_kill(stdin_thread, SIGUSR1);
+  }
 
   stdout_running = false;
 
@@ -174,18 +176,17 @@ void* stdin_routine(void* arg)
   if(args.debug) info_print("Start of stdin routine");
 
   char buffer[1024];
-  memset(buffer, '\0', sizeof(buffer));
 
-  int read_status  = -1;
-  int write_status = -1;
+  int read_size  = -1, write_size = -1;
 
-  while((read_status = buffer_read(stdin_fifo, buffer, sizeof(buffer))) > 0)
+  while((read_size = buffer_read(stdin_fifo, buffer, sizeof(buffer) - 1)) > 0)
   {
-    debug_print(stdout, "engine -> client", "%s", buffer);
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    if((write_status = socket_write(sockfd, buffer, sizeof(buffer))) <= 0) break;
+    if(args.debug) debug_print(stdout, "ENGINE => CLIENT", "%s\033[F", buffer);
 
-    memset(buffer, '\0', sizeof(buffer));
+    if((write_size = socket_write(sockfd, buffer, sizeof(buffer))) <= 0) break;
   }
 
   if(errno != 0)
@@ -195,16 +196,19 @@ void* stdin_routine(void* arg)
 
   // This code block is not needed, but catches the stopped engine earlier
   // If the stdin fifo is broken (End Of File), the node should not be running
-  if(read_status == 0)
+  if(read_size == 0)
   {
     if(args.debug) info_print("Shutting node down");
 
     node_running = false;
   }
 
-  if(args.debug) info_print("Interrupting stdout routine");
+  if(stdout_running)
+  {
+    if(args.debug) info_print("Interrupting stdout routine");
 
-  if(stdout_running) pthread_kill(stdout_thread, SIGUSR1);
+    pthread_kill(stdout_thread, SIGUSR1);
+  }
 
   stdin_running = false;
 
@@ -242,62 +246,38 @@ static void sigpipe_handler(int signum)
 }
 
 /*
- * SIGUSR1 is sent when either stdin_thread or stdout_thread should be closed
+ * SIGUSR1 is the signal used to interrupt stdin and stdout routine
+ *
+ * The signal doesn't need to be processed, just interrupt
  */
 static void sigusr1_handler(int signum) { }
 
 /*
+ * Setup handler for specified signal
  *
+ * The signal will be handled, in comparision to using the signal() function
  */
-static void sigint_handler_setup(void)
+static void signal_handler_setup(int signum, void (*handler) (int))
 {
   struct sigaction sig_action;
 
-  sig_action.sa_handler = sigint_handler;
+  sig_action.sa_handler = handler;
   sig_action.sa_flags = 0;
   sigemptyset(&sig_action.sa_mask);
 
-  sigaction(SIGINT, &sig_action, NULL);
+  sigaction(signum, &sig_action, NULL);
 }
 
 /*
- *
- */
-static void sigpipe_handler_setup(void)
-{
-  struct sigaction sig_action;
-
-  sig_action.sa_handler = sigpipe_handler;
-  sig_action.sa_flags = 0;
-  sigemptyset(&sig_action.sa_mask);
-
-  sigaction(SIGPIPE, &sig_action, NULL);
-}
-
-/*
- *
- */
-static void sigusr1_handler_setup(void)
-{
-  struct sigaction sig_action;
-
-  sig_action.sa_handler = sigusr1_handler;
-  sig_action.sa_flags = 0;
-  sigemptyset(&sig_action.sa_mask);
-
-  sigaction(SIGUSR1, &sig_action, NULL);
-}
-
-/*
- *
+ * Setup handlers for different signals that can be omitted
  */
 static void signals_handler_setup(void)
 {
-  sigpipe_handler_setup();
-  
-  sigint_handler_setup();
+  signal_handler_setup(SIGPIPE, sigpipe_handler);
 
-  sigusr1_handler_setup();
+  signal_handler_setup(SIGINT,  sigint_handler);
+
+  signal_handler_setup(SIGUSR1, sigusr1_handler);
 }
 
 /*
@@ -322,16 +302,15 @@ static int engine_reset(void)
   message_write(stdout_fifo, "uci\n");
 
   char buffer[1024];
-  memset(buffer, '\0', sizeof(buffer));
 
-  // The "status" variable can be used to extract diagnostics
-  int status;
+  int read_size;
 
-  while((status = buffer_read(stdin_fifo, buffer, sizeof(buffer))) > 0)
+  while((read_size = buffer_read(stdin_fifo, buffer, sizeof(buffer) - 1)) > 0)
   {
-    if(strncmp(buffer, "uciok", 5) == 0) break;
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    memset(buffer, '\0', sizeof(buffer));
+    if(strncmp(buffer, "uciok", 5) == 0) break;
   }
 
   if(errno != 0)
@@ -378,7 +357,7 @@ static void node_routine(void)
  * If either address or port is missing, use default value
  *
  * RETURN (int status)
- * - 0 | Success!
+ * - 0 | Success
  * - 1 | Failed to create server socket
  */
 static int args_server_socket_create(void)
@@ -411,11 +390,14 @@ int main(int argc, char* argv[])
     }
   }
 
-  stdin_stdout_fifo_close(&stdin_fifo, &stdout_fifo, args.debug);
+  fifo_close(&stdin_fifo, args.debug);
+
+  fifo_close(&stdout_fifo, args.debug);
 
   socket_close(&sockfd, args.debug);
 
   socket_close(&servfd, args.debug);
+
 
   if(args.debug) info_print("End of main");
 

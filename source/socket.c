@@ -10,7 +10,7 @@
  * Create sockaddr from address and port
  *
  * PARAMS
- * - bool debug | Output debug messages
+ * - bool debug | Print debug messages
  *
  * RETURN (struct sockaddr_in addr)
  */
@@ -67,7 +67,7 @@ static int socket_bind(int sockfd, const char* address, int port, bool debug)
  * -  0 | Success
  * - -1 | Failed to listen to socket
  */
-int socket_listen(int sockfd, int backlog, bool debug)
+static int socket_listen(int sockfd, int backlog, bool debug)
 {
   if(debug) info_print("Start listen to socket");
 
@@ -192,7 +192,7 @@ int socket_close(int* sockfd, bool debug)
 /*
  * Read a single line to a buffer from a socket connection
  *
- * RETURN
+ * RETURN (ssize_t size)
  * - >0 | The number of read characters
  * -  0 | Nothing to read, end of file
  * - -1 | Failed to read from socket
@@ -223,7 +223,7 @@ ssize_t socket_read(int sockfd, char* buffer, size_t size)
 /*
  * Write a single line from a buffer to a socket connection
  *
- * RETURN
+ * RETURN (ssize_t size)
  * - >0 | The number of written characters
  * -  0 | Nothing to write to, end of file
  * - -1 | Failed to write to socket
