@@ -1,3 +1,9 @@
+/*
+ * Written by Hampus Fridholm
+ *
+ * Last updated: 2024-09-08
+ */
+
 #ifndef DEBUG_H
 #define DEBUG_H
 
@@ -6,7 +12,6 @@
 #include <time.h>
 #include <stdarg.h>
 #include <string.h>
-#include <stdbool.h>
 
 extern int debug_print(FILE* stream, const char* title, const char* format, ...);
 

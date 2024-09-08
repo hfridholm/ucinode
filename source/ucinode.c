@@ -1,3 +1,12 @@
+/*
+ * Written by Hampus Fridholm
+ *
+ * Last updated: 2024-09-08
+ */
+
+#define DEFAULT_ADDRESS "127.0.0.1"
+#define DEFAULT_PORT    5555
+
 #include "debug.h"
 #include "socket.h"
 #include "fifo.h"
@@ -5,106 +14,205 @@
 
 #include <stdlib.h>
 #include <signal.h>
+#include <argp.h>
 
-// SIGUSR1 - interrupting threads
+pthread_t stdin_thread;
+bool      stdin_running = false;
 
-pthread_t stdinThread;  // Communication from engine to client
-pthread_t stdoutThread; // Communication from client to engine
+pthread_t stdout_thread;
+bool      stdout_running = false;
 
-bool stdinThreadRunning = false;
-bool stdoutThreadRunning = false;
-
-int serverfd = -1;
 int sockfd = -1;
+int servfd = -1;
 
-int stdinFIFO = -1;
-int stdoutFIFO = -1;
+int stdin_fifo  = -1;
+int stdout_fifo = -1;
 
-bool acceptNewClient = true; // The UCI node should continue running
+bool fifo_reverse = false;
 
-// Settings
-bool debug = false;
-bool reversed = false;
+bool node_running = true;
 
-char address[64] = "127.0.0.1";
-int port = 5555;
 
-char stdinPathname[64] = "stdin";
-char stdoutPathname[64] = "stdout";
+static char doc[] = "ucinode - network server hosting UCI chess engine";
+
+static char args_doc[] = "";
+
+static struct argp_option options[] =
+{
+  { "stdin",   'i', "FIFO",    0, "Stdin FIFO" },
+  { "stdout",  'o', "FIFO",    0, "Stdout FIFO" },
+  { "address", 'a', "ADDRESS", 0, "Network address" },
+  { "port",    'p', "PORT",    0, "Network port" },
+  { "debug",   'd', 0,         0, "Print debug messages" },
+  { 0 }
+};
+
+struct args
+{
+  char*  stdin_path;
+  char*  stdout_path;
+  char*  address;
+  int    port;
+  bool   debug;
+};
+
+struct args args =
+{
+  .stdin_path  = NULL,
+  .stdout_path = NULL,
+  .address     = NULL,
+  .port        = -1,
+  .debug       = false
+};
+
+/*
+ * This is the option parsing function used by argp
+ */
+static error_t opt_parse(int key, char* arg, struct argp_state* state)
+{
+  struct args* args = state->input;
+
+  switch(key)
+  {
+    case 'i':
+      // If the output fifo has already been inputted,
+      // open the output fifo before the input fifo
+      if(args->stdout_path) fifo_reverse = true;
+
+      args->stdin_path = arg;
+      break;
+
+    case 'o':
+      args->stdout_path = arg;
+      break;
+
+    case 'a':
+      args->address = arg;
+      break;
+
+    case 'p':
+      int port = atoi(arg);
+
+      if(port != 0) args->port = port;
+      break;
+
+    case 'd':
+      args->debug = true;
+      break;
+
+    case ARGP_KEY_ARG:
+      break;
+
+    case ARGP_KEY_END:
+      break;
+
+    default:
+      return ARGP_ERR_UNKNOWN;
+  }
+
+  return 0;
+}
 
 /*
  * Communication from client to engine
  */
 void* stdout_routine(void* arg)
 {
-  stdoutThreadRunning = true;
+  stdout_running = true;
 
-  info_print("Redirecting socket -> fifo");
+  if(args.debug) info_print("Start of stdout routine");
 
   char buffer[1024];
-  memset(buffer, '\0', sizeof(buffer));
 
-  int status;
+  int read_size  = -1, write_size = -1;
 
-  while((status = socket_read(sockfd, buffer, sizeof(buffer))) > 0)
+  while((read_size = socket_read(sockfd, buffer, sizeof(buffer) - 1)) > 0)
   {
-    debug_print(stdout, "socket -> fifo", "%s", buffer);
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    // If the client wants to quit
-    if(!strncmp(buffer, "quit", 4)) break;
+    if(args.debug) debug_print(stdout, "client -> engine", "%s", buffer);
 
-    if(buffer_write(stdinFIFO, buffer, sizeof(buffer)) == -1) break;
+    if(strncmp(buffer, "quit", 4) == 0) break;
 
-    memset(buffer, '\0', sizeof(buffer));
-  }
-  info_print("Stopped socket -> fifo");
-
-  // If stdin thread has interrupted stdout thread
-  if(status == -1 && errno == EINTR)
-  {
-    info_print("stdout routine interrupted"); 
+    if((write_size = buffer_write(stdout_fifo, buffer, sizeof(buffer))) <= 0) break;
   }
 
-  // Interrupt stdin thread
-  pthread_kill(stdinThread, SIGUSR1);
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+  }
 
-  stdoutThreadRunning = false;
+  // This code block is not needed, but catches the stopped engine earlier
+  // If the stdout pipe is broken (32), the node should not be running
+  if(write_size == -1 && errno == 32)
+  {
+    if(args.debug) info_print("Shutting node down");
+
+    node_running = false;
+  }
+
+  if(stdin_running)
+  {
+    if(args.debug) info_print("Interrupting stdin routine");
+
+    pthread_kill(stdin_thread, SIGUSR1);
+  }
+
+  stdout_running = false;
+
+  if(args.debug) info_print("End of stdout routine");
 
   return NULL;
 }
 
-// Communication from engine to client
+/*
+ * Communication from engine to client
+ */
 void* stdin_routine(void* arg)
 {
-  stdinThreadRunning = true;
+  stdin_running = true;
 
-  info_print("Redirecting fifo -> socket");
+  if(args.debug) info_print("Start of stdin routine");
 
   char buffer[1024];
-  memset(buffer, '\0', sizeof(buffer));
 
-  int status;
+  int read_size  = -1, write_size = -1;
 
-  while((status = buffer_read(stdoutFIFO, buffer, sizeof(buffer))) > 0)
+  while((read_size = buffer_read(stdin_fifo, buffer, sizeof(buffer) - 1)) > 0)
   {
-    debug_print(stdout, "fifo -> socket", "%s", buffer);
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    if(socket_write(sockfd, buffer, sizeof(buffer)) == -1) break;
+    if(args.debug) debug_print(stdout, "ENGINE => CLIENT", "%s\033[F", buffer);
 
-    memset(buffer, '\0', sizeof(buffer));
-  }
-  info_print("Stopped fifo -> socket");
-
-  // If stdout thread has interrupted stdin thread
-  if(status == -1 && errno == EINTR)
-  {
-    info_print("stdin routine interrupted"); 
+    if((write_size = socket_write(sockfd, buffer, sizeof(buffer))) <= 0) break;
   }
 
-  // Interrupt stdout thread
-  pthread_kill(stdoutThread, SIGUSR1);
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+  }
 
-  stdinThreadRunning = false;
+  // This code block is not needed, but catches the stopped engine earlier
+  // If the stdin fifo is broken (End Of File), the node should not be running
+  if(read_size == 0)
+  {
+    if(args.debug) info_print("Shutting node down");
+
+    node_running = false;
+  }
+
+  if(stdout_running)
+  {
+    if(args.debug) info_print("Interrupting stdout routine");
+
+    pthread_kill(stdout_thread, SIGUSR1);
+  }
+
+  stdin_running = false;
+
+  if(args.debug) info_print("End of stdin routine");
 
   return NULL;
 }
@@ -112,168 +220,186 @@ void* stdin_routine(void* arg)
 /*
  * Keyboard interrupt - close the program (the threads)
  */
-void sigint_handler(int signum)
+static void sigint_handler(int signum)
 {
-  if(debug) info_print("Keyboard interrupt");
+  if(args.debug) info_print("Keyboard interrupt");
 
-  acceptNewClient = false;
+  node_running = false;
 
-  if(stdinThreadRunning) pthread_kill(stdinThread, SIGUSR1);
-  if(stdoutThreadRunning) pthread_kill(stdoutThread, SIGUSR1);
-}
+  if(stdin_running)  pthread_kill(stdin_thread, SIGUSR1);
 
-void sigint_handler_setup(void)
-{
-  struct sigaction sigAction;
-
-  sigAction.sa_handler = sigint_handler;
-  sigAction.sa_flags = 0;
-  sigemptyset(&sigAction.sa_mask);
-
-  sigaction(SIGINT, &sigAction, NULL);
-}
-
-void sigusr1_handler(int signum) {}
-
-void sigusr1_handler_setup(void)
-{
-  struct sigaction sigAction;
-
-  sigAction.sa_handler = sigusr1_handler;
-  sigAction.sa_flags = 0;
-  sigemptyset(&sigAction.sa_mask);
-
-  sigaction(SIGUSR1, &sigAction, NULL);
-}
-
-void signals_handler_setup(void)
-{
-  signal(SIGPIPE, SIG_IGN); // Ignores SIGPIPE
-  
-  sigint_handler_setup();
-
-  sigusr1_handler_setup();
+  if(stdout_running) pthread_kill(stdout_thread, SIGUSR1);
 }
 
 /*
- * Accept socket client
- *
- * RETURN
- * - 0 | Success!
- * - 1 | Failed to accept client socket
- * - 2 | Failed to start stdin and stdout threads
+ * Broken pipe - close the program (the threads)
  */
-int server_process_step3(void)
+static void sigpipe_handler(int signum)
 {
-  while(acceptNewClient)
+  if(args.debug) error_print("Pipe has been broken");
+
+  node_running = false;
+
+  if(stdin_running)  pthread_kill(stdin_thread, SIGUSR1);
+
+  if(stdout_running) pthread_kill(stdout_thread, SIGUSR1);
+}
+
+/*
+ * SIGUSR1 is the signal used to interrupt stdin and stdout routine
+ *
+ * The signal doesn't need to be processed, just interrupt
+ */
+static void sigusr1_handler(int signum) { }
+
+/*
+ * Setup handler for specified signal
+ *
+ * The signal will be handled, in comparision to using the signal() function
+ */
+static void signal_handler_setup(int signum, void (*handler) (int))
+{
+  struct sigaction sig_action;
+
+  sig_action.sa_handler = handler;
+  sig_action.sa_flags = 0;
+  sigemptyset(&sig_action.sa_mask);
+
+  sigaction(signum, &sig_action, NULL);
+}
+
+/*
+ * Setup handlers for different signals that can be omitted
+ */
+static void signals_handler_setup(void)
+{
+  signal_handler_setup(SIGPIPE, sigpipe_handler);
+
+  signal_handler_setup(SIGINT,  sigint_handler);
+
+  signal_handler_setup(SIGUSR1, sigusr1_handler);
+}
+
+/*
+ * Tell the chess engine to quit, by sending it a quit message
+ */
+static void engine_quit(void)
+{
+  if(args.debug) info_print("Quitting engine");
+
+  if(stdout_fifo) message_write(stdout_fifo, "quit\n");
+}
+
+/*
+ * Reset the chess engine for the next client, by 
+ * - starting a new UCI game and
+ * - setting the position to the start position 
+ */
+static int engine_reset(void)
+{
+  if(args.debug) info_print("Establishing engine UCI communication");
+
+  message_write(stdout_fifo, "uci\n");
+
+  char buffer[1024];
+
+  int read_size;
+
+  while((read_size = buffer_read(stdin_fifo, buffer, sizeof(buffer) - 1)) > 0)
   {
-    sockfd = socket_accept(serverfd, address, port, debug);
+    // IMPORTANT: Terminate string after reading bytes
+    buffer[read_size] = '\0';
 
-    if(sockfd == -1) return 1;
-
-    int status = stdin_stdout_thread_start(&stdinThread, &stdin_routine, &stdoutThread, &stdout_routine, debug);
-
-    socket_close(&sockfd, debug);
-
-    if(status != 0) return 2;
+    if(strncmp(buffer, "uciok", 5) == 0) break;
   }
+
+  if(errno != 0)
+  {
+    if(args.debug) error_print("%s", strerror(errno));
+
+    return 1;
+  }
+
+  if(args.debug) info_print("Setting up new engine game");
+
+  message_write(stdout_fifo, "ucinewgame\n");
+
+  message_write(stdout_fifo, "position startpos\n");
+
   return 0;
 }
 
 /*
- * Create server socket
+ * Run as long as the server is still running
+ */
+static void node_routine(void)
+{
+  while(node_running && servfd != -1)
+  {
+    if(engine_reset() != 0) break;
+
+    sockfd = socket_accept(servfd, args.address, args.port, args.debug);
+
+    // If the server socket fails, stop node
+    if(sockfd == -1) break;
+
+    stdin_stdout_thread_start(&stdin_thread, &stdin_routine, &stdout_thread, &stdout_routine, args.debug);
+
+    socket_close(&sockfd, args.debug);
+  }
+
+  engine_quit();
+}
+
+/*
+ * Create server socket using address and port arguments
  *
- * RETURN
- * - 0 | Success!
+ * If either address or port is missing, use default value
+ *
+ * RETURN (int status)
+ * - 0 | Success
  * - 1 | Failed to create server socket
- * - 2 | Failed server_process_step3
  */
-int server_process_step2(void)
+static int args_server_socket_create(void)
 {
-  serverfd = server_socket_create(address, port, 1, debug);
+  if(!args.address)   args.address = DEFAULT_ADDRESS;
 
-  if(serverfd == -1) return 1;
+  if(args.port == -1) args.port    = DEFAULT_PORT;
 
-  int status = server_process_step3();
+  servfd = server_socket_create(args.address, args.port, args.debug);
 
-  socket_close(&serverfd, debug);
-
-  return (status != 0) ? 2 : 0;
+  return (servfd == -1) ? 1 : 0;
 }
 
-/*
- * RETURN
- * - 0 | Success!
- * - 1 | Failed to open stdin and stdout FIFOs
- * - 2 | Failed to close stdin and stdout FIFOs
- * - 3 | Failed server_process_step2
- */
-int server_process(void)
-{
-  if(stdin_stdout_fifo_open(&stdinFIFO, stdinPathname, &stdoutFIFO, stdoutPathname, reversed, debug) != 0) return 1;
-
-  int status = server_process_step2();
-
-  if(stdin_stdout_fifo_close(&stdinFIFO, &stdoutFIFO, debug) != 0) return 2;
-
-  return (status != 0) ? 3 : 0;
-}
+static struct argp argp = { options, opt_parse, args_doc, doc };
 
 /*
- * Parse the current passed flag
  *
- * FLAGS
- * --debug             | Output debug messages
- * --reversed          | Open stdout FIFO before stdin FIFO
- * --stdin=<name>      | The name of stdin FIFO
- * --stdout=<name>     | The name of stdout FIFO
- * --address=<address> | The server address
- * --port=<port>       | The server port
  */
-void flag_parse(char flag[])
-{
-  if(!strcmp(flag, "--debug"))
-  {
-    debug = true;
-  }
-  else if(!strcmp(flag, "--reversed"))
-  {
-    reversed = true;
-  }
-  else if(!strncmp(flag, "--address=", 10))
-  {
-    strcpy(address, flag + 10);
-  }
-  else if(!strncmp(flag, "--port=", 7))
-  {
-    port = atoi(flag + 7);
-  }
-  else if(!strncmp(flag, "--stdin=", 8))
-  {
-    strcpy(stdinPathname, flag + 8);
-  }
-  else if(!strncmp(flag, "--stdout=", 9))
-  {
-    strcpy(stdoutPathname, flag + 9);
-  }
-}
-
-/*
- * Parse every passed flag
- */
-void flags_parse(int argc, char* argv[])
-{
-  for(int index = 1; index < argc; index += 1)
-  {
-    flag_parse(argv[index]);
-  }
-}
-
 int main(int argc, char* argv[])
 {
-  flags_parse(argc, argv);
+  argp_parse(&argp, argc, argv, 0, 0, &args);
 
   signals_handler_setup();
 
-  return server_process();
+  if(stdin_stdout_fifo_open(&stdin_fifo, args.stdin_path, &stdout_fifo, args.stdout_path, fifo_reverse, args.debug) == 0)
+  {
+    if(args_server_socket_create() == 0)
+    {
+      node_routine();
+    }
+  }
+
+  fifo_close(&stdin_fifo, args.debug);
+
+  fifo_close(&stdout_fifo, args.debug);
+
+  socket_close(&sockfd, args.debug);
+
+  socket_close(&servfd, args.debug);
+
+
+  if(args.debug) info_print("End of main");
+
+  return 0;
 }
